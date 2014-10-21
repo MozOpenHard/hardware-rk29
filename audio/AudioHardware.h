@@ -29,6 +29,7 @@
 
 #include <speex/speex.h>
 #include <speex/speex_preprocess.h>
+#include <speex/speex_resampler.h>
 extern "C" {
     struct pcm;
     struct mixer;
@@ -49,14 +50,14 @@ namespace android_audio_legacy {
 // Kernel pcm out buffer size in frames at 44.1kHz
 #define AUDIO_HW_OUT_PERIOD_MULT 16 // (16 * 64 = 1024 frames)
 #define AUDIO_HW_OUT_PERIOD_SZ (PCM_PERIOD_SZ_MIN * AUDIO_HW_OUT_PERIOD_MULT)
-#define AUDIO_HW_OUT_PERIOD_CNT 6
+#define AUDIO_HW_OUT_PERIOD_CNT 4
 // Default audio output buffer size in bytes
 #define AUDIO_HW_OUT_PERIOD_BYTES (AUDIO_HW_OUT_PERIOD_SZ * 2 * sizeof(int16_t))
 
 // Default audio input sample rate
 #define AUDIO_HW_IN_SAMPLERATE 44100
 // Default audio input channel mask
-#define AUDIO_HW_IN_CHANNELS (AudioSystem::CHANNEL_IN_MONO)
+#define AUDIO_HW_IN_CHANNELS (AudioSystem::CHANNEL_IN_STEREO)
 // Default audio input sample format
 #define AUDIO_HW_IN_FORMAT (AudioSystem::PCM_16_BIT)
 // Number of buffers in audio driver for input
@@ -72,11 +73,13 @@ namespace android_audio_legacy {
 
 
 //1:Enable the AGC funtion ;0: disable the AGC function
-#define SPEEX_AGC_ENABLE 1
+#define SPEEX_AGC_ENABLE 0
 
 //1:Enable the denoise funtion ;0: disable the denoise function
 
 #define SPEEX_DENOISE_ENABLE 1
+
+#define RESAMPLER_QUALITY SPEEX_RESAMPLER_QUALITY_DEFAULT
 
 
 class AudioHardware : public AudioHardwareBase
@@ -116,9 +119,10 @@ public:
         uint32_t sampleRate, int format, int channelCount);
 
             int  mode() { return mMode; }
-            const char *getOutputRouteFromDevice(uint32_t device);
-            const char *getInputRouteFromDevice(uint32_t device);
-            const char *getVoiceRouteFromDevice(uint32_t device);
+            unsigned getOutputRouteFromDevice(uint32_t device);
+            unsigned getInputRouteFromDevice(uint32_t device);
+            unsigned getVoiceRouteFromDevice(uint32_t device);
+            unsigned getRouteFromDevice(uint32_t device);
 
             status_t setIncallPath_l(uint32_t device);
 
@@ -132,8 +136,7 @@ public:
            struct pcm *openPcmOut_l();
            void closePcmOut_l();
 
-           struct mixer *openMixer_l();
-           void closeMixer_l();
+           struct pcm *getPcm() { return mPcm; };
 
             android::sp <AudioStreamOutALSA>  output() { return mOutput; }
 
@@ -148,10 +151,10 @@ private:
      android::SortedVector <  android::sp<AudioStreamInALSA> >   mInputs;
      android::Mutex           mLock;
     struct pcm*     mPcm;
-    struct mixer*   mMixer;
     uint32_t        mPcmOpenCnt;
     uint32_t        mMixerOpenCnt;
     bool            mInCallAudioMode;
+    bool            mVoipAudioMode;
 
     String8         mInputSource;
     bool            mBluetoothNrec;
@@ -221,8 +224,6 @@ private:
 
         android::Mutex mLock;
         AudioHardware* mHardware;
-        struct pcm *mPcm;
-        struct mixer *mMixer;
         struct mixer_ctl *mRouteCtl;
         const char *next_route;
         bool mStandby;
@@ -259,6 +260,7 @@ private:
     class DownSampler {
     public:
         DownSampler(uint32_t outSampleRate,
+                  uint32_t inSampleRate,
                   uint32_t channelCount,
                   uint32_t frameCount,
                   BufferProvider* provider);
@@ -275,19 +277,11 @@ private:
         uint32_t mSampleRate;
         uint32_t mChannelCount;
         uint32_t mFrameCount;
-        int16_t *mInLeft;
-        int16_t *mInRight;
-        int16_t *mTmpLeft;
-        int16_t *mTmpRight;
-        int16_t *mTmp2Left;
-        int16_t *mTmp2Right;
-        int16_t *mOutLeft;
-        int16_t *mOutRight;
-        int mInInBuf;
-        int mInTmpBuf;
-        int mInTmp2Buf;
+        int16_t *mTmpOutBuf;
         int mOutBufPos;
         int mInOutBuf;
+        int mInInBuf;
+        SpeexResamplerState *mInResampler;   // handle on input speex resampler
     };
 
 
@@ -337,7 +331,6 @@ private:
          android::Mutex mLock;
         AudioHardware* mHardware;
         struct pcm *mPcm;
-        struct mixer *mMixer;
         struct mixer_ctl *mRouteCtl;
         const char *next_route;
         bool mStandby;
@@ -345,6 +338,8 @@ private:
         uint32_t mChannels;
         uint32_t mChannelCount;
         uint32_t mSampleRate;
+        uint32_t mReqSampleRate;
+        uint32_t mInSampleRate;
         size_t mBufferSize;
         DownSampler *mDownSampler;
         status_t mReadStatus;

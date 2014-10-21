@@ -46,10 +46,13 @@
 #include <camera/Camera.h>
 #include <hardware/camera.h>
 #include <camera/CameraParameters.h>
-
-
+#if defined(TARGET_RK29)
+#include <linux/android_pmem.h>
+#endif
 #include "MessageQueue.h"
 #include "../jpeghw/release/encode_release/hw_jpegenc.h"
+#include "../jpeghw/release/encode_release/rk29-ipp.h"
+#include "../libon2/vpu_global.h"
 
 
 /* 
@@ -196,8 +199,94 @@ namespace android {
 *         1)fix testFocusAreas faild in CTS;
 *v0.3.33:
 *         1)fix v0.3.33 version zoneStr haven't check is NULL;
+*
+*v0.4.1 :
+*         1)compatible with generic_sensor driver;
+*         2)support auto create media_profiles.xml;
+*         3)fix take picture encode error if rotate 90 or 270 in rk2928;
+*         4)fix fill data to display buffer ignore stride, rk3066b display 176x144 error;
+*v0.4.3:
+*         1)fix convert nv12 to rgb565 by rga must set alpha_rop_flag bit;
+*
+*v0.4.5:
+*         1)fix setParameters dead lock in mlock for camera service, because picture thread run in mDataCb;
+*v0.4.7:
+*         1)fix snapshot error when recording for uvc camera;
+*         2)pause display thread when pause preview thread;
+*v0.4.9:
+*		  1)fix video snapshot orientation erro of 180 degree
+*         2)add support white balance control for uvc camera;
+*v0.4.b:
+*         1)fix uvc camera cts pass for 4.2_r4;
+*         2)fix deadlock in testPreviewCallbackWithPicture test;
+*
+*v0.4.e:
+*         1)fix media_profiles.xml which auto created obtain some element's resolution is bigger than sensor resolution;
+*
+*v0.4.f:
+*         1)fix cam_size local variable is overflow in initDefaultParameters;
+*v0.4.11:
+*         1)fix raw data buffer haven't cacheflush in capture for uvc camera;
+*         2)fix uvc camera haven't close when capture error;
+*
+*v0.4.13
+*         1)fix display buffer may be changed when rorate;
+*v0.4.15:
+*         1)support query fov from kernel;
+*         2)support create media_profiles.xml auto for uvc camera;
+*         3)fix snapshot error when recording for uvc camera;  for v0.4.7
+*v0.4.17:
+*         1)support VIDIOC_S_CROP for fied of view; it is for CTS Verifyer FOV;
+*v0.4.19:
+*         1)support anti-banding and exposure manual for uvc;
+*v0.4.1b:
+*		  1)fix video snapshot erro when orientation is 180 degree.
+*
+*v0.4.1d:
+*         1)support mjpeg format for uvc camera;
+*v0.4.1f:
+*         1)mjpeg mirror;
+*v0.4.0x21:
+*         1)It isn't support set framerate after start preview for uvc; 
+*           This would be lead to CTS failed;
+*v0.4.0x23
+*         1)cameraFormatConvert parameters error in captureVideoPicture; Snapshot during recording is error;
+*
+*v0.4.0x27:
+*         1) get_class_On2JpegDecoder interface is in librk_on2.so for android 4.4;
+*v0.4.0x29:
+*         1)exposure instead of brightness for uvc;
+*         2)digital zoom for uvc;
+*         3)create preview process thread and preview dispatch thread for uvc mjpeg decode;
+*         4)create buffer independent in ion for cache flush independent;
+*         5)dec_oneframe_class_On2JpegDecoder change to dec_oneframe_On2JpegDecoder in android4.4;
+*v0.4.0x2b:
+		  1)didn't ummap buffer if  usb capture erro,fix it
+		  2)increase raw buffer size for 1M.
+*v0.4.0x2d:
+          1) support setVideoSize function.this feature has not been full tested now(CTS NOT TEST).
+*v0.4.0x2f:
+*         1)video buffer don't been display and enc ,if it's flag is error;
+*v0.4.0x31:
+		 1)fix setVideoSize bugs
+*v0.4.0x33:
+		 1)fix recording bug caused by v0.4.0x31
+		
+*v0.4.0x35:
+		1)fix recording bug && Pano bug caused by v0.4.0x33
+*v0.4.0x37:
+		1)set file(/data/media_profiles.xml) mode 0644  after it is created
+*v0.4.0x39:
+		1)fix Jpeg exif:maker and model decode bugs in Camera2.apk
+*v0.4.0x3b:
+             1)fix uvc manual exposure bug in cameraConfig function.
+*v0.4.0x3d:
+             1)uvc support 16 bit unaligned resolution.
+             2)fix uvc manual exposure bug in  v0.4.0x3b.
 */
-#define CONFIG_CAMERAHAL_VERSION KERNEL_VERSION(0, 3, 0x33) 
+
+#define CONFIG_CAMERAHAL_VERSION KERNEL_VERSION(0, 4, 0x3d) 
+
 
 /*  */
 #define CAMERA_DISPLAY_FORMAT_YUV420SP   CameraParameters::PIXEL_FORMAT_YUV420SP
@@ -221,6 +310,18 @@ namespace android {
 #define CONFIG_CAMERA_ORIENTATION_SKYPE     0
 #define CONFIG_CAMERA_FRONT_ORIENTATION_SKYPE     0
 #define CONFIG_CAMERA_BACK_ORIENTATION_SKYPE      0
+#define CONFIG_CAMERA_UVC_MJPEG_SUPPORT           1
+#define CONFIG_CAMERA_SETVIDEOSIZE	0
+
+#define CONFIG_CAMERA_UVC_MANEXP                1
+#define CONFIG_CAMERA_UVC_MANEXP_MINUS_3        100
+#define CONFIG_CAMERA_UVC_MANEXP_MINUS_2        150
+#define CONFIG_CAMERA_UVC_MANEXP_MINUS_1        200
+#define CONFIG_CAMERA_UVC_MANEXP_DEFAULT        300
+#define CONFIG_CAMERA_UVC_MANEXP_PLUS_1         400
+#define CONFIG_CAMERA_UVC_MANEXP_PLUS_2         450
+#define CONFIG_CAMERA_UVC_MANEXP_PLUS_3         550
+
 
 #define CONFIG_CAMERA_FRONT_PREVIEW_FPS_MIN    3000        // 3fps
 #define CONFIG_CAMERA_FRONT_PREVIEW_FPS_MAX    30000        //30fps
@@ -236,7 +337,7 @@ namespace android {
 #define RAW_BUFFER_SIZE_5M         (( mCamDriverPreviewFmt == V4L2_PIX_FMT_RGB565) ? 0x9A0000:0x740000)
 #define RAW_BUFFER_SIZE_3M          (( mCamDriverPreviewFmt == V4L2_PIX_FMT_RGB565) ?0x600000 :0x480000)
 #define RAW_BUFFER_SIZE_2M          (( mCamDriverPreviewFmt == V4L2_PIX_FMT_RGB565) ?0x3A0000 :0x2c0000)
-#define RAW_BUFFER_SIZE_1M          (( mCamDriverPreviewFmt == V4L2_PIX_FMT_RGB565)? 0x180000 :0x120000)
+#define RAW_BUFFER_SIZE_1M          (( mCamDriverPreviewFmt == V4L2_PIX_FMT_RGB565)? 0x180000 :0x1c2000)
 #define RAW_BUFFER_SIZE_0M3         (( mCamDriverPreviewFmt == V4L2_PIX_FMT_RGB565)?0x150000 :0x100000)
 
 #define JPEG_BUFFER_SIZE_8M          0x700000
@@ -303,6 +404,7 @@ typedef struct rk_previewbuf_info {
     int phy_addr;
     int vir_addr;
     int buf_state;
+    int stride;
 } rk_previewbuf_info_t;
 
 enum PreviewBufStatus {
@@ -321,6 +423,28 @@ enum PreviewBufStatus {
 #define CAMERA_IS_UVC_CAMERA()  (strcmp((char*)&mCamDriverCapability.driver[0],"uvcvideo") == 0)
 #define CAMERA_IS_RKSOC_CAMERA()  ((strstr((char*)&mCamDriverCapability.driver[0],"rk") != NULL)\
                                     && (strstr((char*)&mCamDriverCapability.driver[0],"-camera") != NULL))
+
+
+/* mjpeg decoder interface in libvpu.*/
+typedef void* (*getMjpegDecoderFun)(void);
+typedef void (*destroyMjpegDecoderFun)(void* jpegDecoder);
+
+typedef int (*initMjpegDecoderFun)(void* jpegDecoder);
+typedef int (*deInitMjpegDecoderFun)(void* jpegDecoder);
+
+typedef int (*mjpegDecodeOneFrameFun)(void * jpegDecoder,uint8_t* aOutBuffer, uint32_t *aOutputLength,
+        uint8_t* aInputBuf, uint32_t* aInBufSize, uint32_t out_phyaddr);
+
+typedef struct mjpeg_interface {
+    void*                       decoder;
+    int                         state;
+    
+    getMjpegDecoderFun          get;
+    destroyMjpegDecoderFun      destroy;
+    initMjpegDecoderFun         init;
+    deInitMjpegDecoderFun       deInit;
+    mjpegDecodeOneFrameFun      decode;
+} mjpeg_interface_t;
 
 
 class CameraHal {
@@ -598,8 +722,36 @@ private:
         }
     };
 
+    class PreviewProcessThread : public Thread {
+        CameraHal* mHardware;
+    public:
+        PreviewProcessThread(CameraHal* hw)
+            : Thread(false), mHardware(hw) { }
+
+        virtual bool threadLoop() {
+            mHardware->previewProcessThread();
+
+            return false;
+        }
+    };
+
+    class PreviewDispatchThread : public Thread {
+        CameraHal* mHardware;
+    public:
+        PreviewDispatchThread(CameraHal* hw)
+            : Thread(false), mHardware(hw) { }
+
+        virtual bool threadLoop() {
+            mHardware->previewDispatchThread();
+
+            return false;
+        }
+    };
+
     void displayThread();
     void previewThread();
+    void previewProcessThread();
+    void previewDispatchThread();
 	void commandThread();
     void pictureThread();
     void snapshotThread();
@@ -612,20 +764,23 @@ private:
     int cameraDestroy();
     int cameraConfig(const CameraParameters &params);
     int cameraQuery(CameraParameters &params);
-    int cameraSetSize(int w, int h,  int fmt);
+    int cameraSetSize(int w, int h, int fmt, bool is_capture);
     int cameraStart();
     int cameraStop();
     int cameraStream(bool on);
 	int cameraAutoFocus(const char *focus, bool auto_trig_only);
-    int Jpegfillgpsinfo(RkGPSInfo *gpsInfo);
-    int Jpegfillexifinfo(RkExifInfo *exifInfo);
+    int Jpegfillgpsinfo(RkGPSInfo *gpsInfo,CameraParameters &params);
+    int Jpegfillexifinfo(RkExifInfo *exifInfo,CameraParameters &params);
     int copyAndSendRawImage(void *raw_image, int size);
     int copyAndSendCompressedImage(void *compressed_image, int size);
         
     int cameraRawJpegBufferCreate(int rawBufferSize, int jpegBufferSize);
     int cameraRawJpegBufferDestory();
-    int cameraFormatConvert(int v4l2_fmt_src, int v4l2_fmt_dst, const char *android_fmt_dst, char *srcbuf, char *dstbuf, 
-                            int srcphy,int dstphy,int src_w, int src_h,int dst_w, int dst_h, bool mirror);
+    int cameraFormatConvert(int v4l2_fmt_src, int v4l2_fmt_dst, const char *android_fmt_dst, 
+                            char *srcbuf, char *dstbuf,int srcphy,int dstphy,int src_size,
+                            int src_w, int src_h, int srcbuf_w,
+                            int dst_w, int dst_h, int dstbuf_w,
+                            bool mirror);
      int cameraDisplayBufferCreate(int width, int height, const char *fmt,int numBufs);
      int cameraDisplayBufferDestory(void);
      int cameraPreviewBufferCreate(unsigned int numBufs);
@@ -641,7 +796,16 @@ private:
     int cameraPreviewThreadSet(unsigned int setStatus,int done);
 
 	int cameraSetFaceDetect(bool window,bool on);   
-    char *cameraDevicePathCur;    
+
+    int cameraParametersGet(CameraParameters &params);
+    int cameraParametersSet(CameraParameters &params);
+
+    void previewDispatch(unsigned int buf_idx, bool snapshot, bool bypass);
+    
+	void stopPreviewUnlock();
+	void startPreviewUnlock();
+
+	char *cameraDevicePathCur;    
     char cameraCallProcess[30];
     struct v4l2_capability mCamDriverCapability;
     unsigned int mCamDriverFrmWidthMax;
@@ -654,6 +818,7 @@ private:
     unsigned int mCamDriverV4l2BufferLen;
 
     mutable Mutex mLock;        // API lock -- all public methods
+    mutable Mutex mParametersLock;         /* ddl@rock-chips.com: v0.4.5 */
     CameraParameters mParameters;
     Mutex mANativeWindowLock;
     Condition mANativeWindowCond;
@@ -675,6 +840,7 @@ private:
     int mDispBufUndqueueMin;
     volatile int32_t mPreviewStartTimes;  
     int mPreviewFrameIndex;
+    struct v4l2_rect mCropView;
 
     rk_previewbuf_info_t *mPreviewBuffer[CONFIG_CAMERA_PRVIEW_BUF_CNT];
     rk_previewbuf_info_t *mPreviewBufferMap[CONFIG_CAMERA_PRVIEW_BUF_CNT];
@@ -684,12 +850,16 @@ private:
     camera_memory_t* mPreviewMemory;
     unsigned char* mPreviewBufs[CONFIG_CAMERA_PRVIEW_BUF_CNT];
     camera_memory_t* mVideoBufs[CONFIG_CAMERA_PRVIEW_BUF_CNT];
+    int mVideoWidth;
+    int mVideoHeight;
     
-    unsigned int CameraHal_SupportFmt[5];
+    unsigned int CameraHal_SupportFmt[6];
     char mDisplayFormat[30];
     
     sp<DisplayThread>  mDisplayThread;
     sp<PreviewThread>  mPreviewThread;
+    sp<PreviewProcessThread>  mPreviewProcessThread;
+    sp<PreviewDispatchThread>  mPreviewDispatchThread;
 	sp<CommandThread>  mCommandThread;
     sp<PictureThread>  mPictureThread;
     sp<SnapshotThread>  mSnapshotThread;
@@ -697,6 +867,8 @@ private:
     int mSnapshotRunning;
     int mCommandRunning;
     unsigned int mPreviewRunning;
+    bool mPreviewProcessRunning;
+    bool mPreviewDispatchRunning;
     Mutex mPreviewLock;
     Condition mPreviewCond;
     bool mPreviewCmdReceived;
@@ -715,6 +887,9 @@ private:
     int iCamFd;
     int mCamId;
     int mRGAFd;
+
+    mjpeg_interface_t mMjpegDecoder;
+    void* mLibstageLibHandle;
     
     bool mDriverMirrorSupport;
     bool mDriverFlipSupport;
@@ -728,6 +903,9 @@ private:
 
     struct v4l2_querymenu mScene_menu[20];
     int mScene_number;
+
+    struct v4l2_querymenu mAntiBanding_menu[5];
+    int mAntiBanding_number;
     
     int mZoomMin;
     int mZoomMax;
@@ -735,6 +913,9 @@ private:
 
     struct v4l2_querymenu mFlashMode_menu[20];
     int mFlashMode_number;
+
+    int mUvcManExposure[7];
+
 
     double mGps_latitude;
     double mGps_longitude;
@@ -779,6 +960,18 @@ private:
         CMD_PREVIEW_VIDEOSNAPSHOT,
         CMD_PREVIEW_INVAL
     };
+    enum PreviewProcessThreadCmds {
+        CMD_PREVIEW_PROCESS_PAUSE,
+        CMD_PREVIEW_PROCESS_START,
+        CMD_PREVIEW_PROCESS_CONVERT_UVC,
+        CMD_PREVIEW_PROCESS_EXIT
+    };
+    enum PreviewDispatchThreadCmds {
+        CMD_PREVIEW_DISPATCH_PAUSE,
+        CMD_PREVIEW_DISPATCH_START,
+        CMD_PREVIEW_DISPATCH_FRAME,
+        CMD_PREVIEW_DISPATCH_EXIT
+    };
     enum CommandThreadCommands { 
 		// Comands
         CMD_PREVIEW_START,
@@ -804,9 +997,13 @@ private:
     MessageQueue    displayThreadCommandQ;
     MessageQueue    displayThreadAckQ;
     MessageQueue    previewThreadCommandQ;
-    MessageQueue    snapshotThreadAckQ;
-    MessageQueue    snapshotThreadCommandQ;
     MessageQueue    previewThreadAckQ;
+    MessageQueue    previewProcessThreadCmdQ;
+    MessageQueue    previewProcessThreadAckQ;
+    MessageQueue    previewDispatchThreadCmdQ;
+    MessageQueue    previewDispatchThreadAckQ;
+    MessageQueue    snapshotThreadAckQ;
+    MessageQueue    snapshotThreadCommandQ;    
     MessageQueue    commandThreadCommandQ;
     MessageQueue    commandThreadAckQ;
     
@@ -816,6 +1013,7 @@ private:
     camera_request_memory mRequestMemory;
     void  *mCallbackCookie;
     MemManagerBase* mCamBuffer;
+	int uvcZoomVal;
 };
 
 }; // namespace android

@@ -198,8 +198,8 @@ void Acc_DeinitDevice(void)
     /* 若 acc 设备已经被启动, 则... */
     if ( sHasEnabledAcc ) 
     {
-        D("to call 'MMA_IOCTL_CLOSE'.");
-        if ( ioctl(sAccFd, MMA_IOCTL_CLOSE) < 0 )
+        D("to call 'GSENSOR_IOCTL_CLOSE'.");
+        if ( ioctl(sAccFd, GSENSOR_IOCTL_CLOSE) < 0 )
         {
             E("failed to disable acc device.");
         }
@@ -226,13 +226,13 @@ int16_t Acc_GetAccelerationData(float fData[3])
     int16_t result = AKD_SUCCESS;
     struct itimerspec ts;   /* 将用于定义超时时间. */
 
-    struct mma8452_axis accData = {0, 0, 0};
+    struct sensor_axis accData = {0, 0, 0};
 
     /* 若尚未使能 acc, 则... */
     if ( !sHasEnabledAcc )
     {
         /* 使能 acc. */
-        if ( 0 > ioctl(sAccFd, MMA_IOCTL_START) ) 
+        if ( 0 > ioctl(sAccFd, GSENSOR_IOCTL_START) ) 
         {
             E("failed to START acc device; error is '%s'.", strerror(errno));
             result = AKD_FAIL;
@@ -240,7 +240,7 @@ int16_t Acc_GetAccelerationData(float fData[3])
         }
         /* 设置采样率. */
 		int sample_rate = MMA8452_RATE_12P5;        // .! : 暂时先使用 12.5 Hz.
-        if ( 0 > ioctl(sAccFd, MMA_IOCTL_APP_SET_RATE, &sample_rate) ) 
+        if ( 0 > ioctl(sAccFd, GSENSOR_IOCTL_APP_SET_RATE, &sample_rate) ) 
         {
             E("failed to set sample rete of acc device; error is '%s'.", strerror(errno));
             result = AKD_FAIL;
@@ -251,7 +251,7 @@ int16_t Acc_GetAccelerationData(float fData[3])
     }
     
     /* 获取 acc sensor 数据. */ // .! : 尽量不阻塞. 
-    if ( 0 > ioctl(sAccFd, MMA_IOCTL_GETDATA, &accData) )
+    if ( 0 > ioctl(sAccFd, GSENSOR_IOCTL_GETDATA, &accData) )
     {
         E("failed to GET acc data, error is '%s.'", strerror(errno));
         result = AKD_FAIL;
@@ -271,8 +271,8 @@ int16_t Acc_GetAccelerationData(float fData[3])
 
     /* 转化为 Android 定义的格式, 待返回. */    // .! : 和 HAL 的 MmaSensor.cpp 中一致, 使用 默认横屏坐标定义 g sensor 数据.
     fData[0] = ( (accData.x) * ACCELERATION_RATIO_ANDROID_TO_HW);
-    fData[2] = ( (accData.y) * ACCELERATION_RATIO_ANDROID_TO_HW);
-    fData[1] = ( (accData.z) * ACCELERATION_RATIO_ANDROID_TO_HW);
+    fData[1] = ( (accData.y) * ACCELERATION_RATIO_ANDROID_TO_HW);
+    fData[2] = ( (accData.z) * ACCELERATION_RATIO_ANDROID_TO_HW);
     D_WHEN_REPEAT(100, "got acc sensor data : x = %f, y = %f, z = %f.", fData[0], fData[1], fData[2] );
     
 EXIT:
@@ -297,8 +297,8 @@ void onTimeOut(sigval_t v)
             D("to disable acc device.");
             if ( sHasEnabledAcc )
             {
-                D("to call 'MMA_IOCTL_CLOSE'.");
-                if ( ioctl(sAccFd, MMA_IOCTL_CLOSE) < 0 )
+                D("to call 'GSENSOR_IOCTL_CLOSE'.");
+                if ( ioctl(sAccFd, GSENSOR_IOCTL_CLOSE) < 0 )
                 {
                     E("failed to disable acc device.");
                 }

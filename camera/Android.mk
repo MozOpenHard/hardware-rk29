@@ -10,7 +10,7 @@ LOCAL_SRC_FILES:=\
 	CameraHal.cpp\
 	CameraHal_Utils.cpp\
 	MessageQueue.cpp\
-	CameraHal_Mem.cpp
+	CameraHal_Mem.cpp\
   
 ifeq ($(strip $(TARGET_BOARD_HARDWARE)),rk30board)	 
 LOCAL_C_INCLUDES += \
@@ -18,7 +18,8 @@ LOCAL_C_INCLUDES += \
   external/jpeg \
   external/jhead\
   hardware/rk29/hwcomposer_rga\
-	hardware/rk29/libgralloc_ump/ump/include	
+	hardware/rk29/libgralloc_ump/ump/include\
+	hardware/rk29/libon2
 
 LOCAL_SHARED_LIBRARIES:= \
     libui \
@@ -29,8 +30,9 @@ LOCAL_SHARED_LIBRARIES:= \
     libgui\
     libjpeg\
     libjpeghwenc\
-    libion
-    #libyuvtorgb\
+    libion\
+    libvpu\
+    libdl
 
 endif
 ifeq ($(strip $(TARGET_BOARD_HARDWARE)),rk2928board)
@@ -39,7 +41,8 @@ LOCAL_C_INCLUDES += \
   external/jpeg \
   external/jhead\
   hardware/rk29/hwcomposer_rga\
-    hardware/rk29/libgralloc_ump/ump/include
+  hardware/rk29/libon2\
+  hardware/rk29/libgralloc_ump/ump/include
 
 LOCAL_SHARED_LIBRARIES:= \
     libui \
@@ -50,10 +53,9 @@ LOCAL_SHARED_LIBRARIES:= \
     libgui\
     libjpeg\
     libjpeghwenc\
-    libyuvtorgb\
-    libion
-    #    
-    #libyuvtorgb\
+    libion\
+    libvpu\
+    libdl
 
 endif
 ifeq ($(strip $(TARGET_BOARD_HARDWARE)),rk29board)    
@@ -90,7 +92,19 @@ ifeq ($(strip $(TARGET_BOARD_HARDWARE)),rk29board)
 LOCAL_CFLAGS += -DTARGET_RK29
 endif
 
-ifeq ($(strip $(TARGET_BOARD_PLATFORM)),rk30xx)	
+ifeq ($(strip $(TARGET_BOARD_PLATFORM)),rk3188)
+LOCAL_CFLAGS += -DTARGET_BOARD_PLATFORM_RK30XX
+endif
+
+ifeq ($(strip $(TARGET_BOARD_PLATFORM)),rk3066)
+LOCAL_CFLAGS += -DTARGET_BOARD_PLATFORM_RK30XX
+endif
+
+ifeq ($(strip $(TARGET_BOARD_PLATFORM)),rk3026)
+LOCAL_CFLAGS += -DTARGET_BOARD_PLATFORM_RK30XX
+endif
+
+ifeq ($(strip $(TARGET_BOARD_PLATFORM)),rk30xx)
 LOCAL_CFLAGS += -DTARGET_BOARD_PLATFORM_RK30XX
 endif
 

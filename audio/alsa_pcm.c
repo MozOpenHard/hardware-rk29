@@ -40,12 +40,17 @@
 #define __user
 #include "asound.h"
 
-#define DEBUG 0
-
-/* alsa parameter manipulation cruft */
-#undef ALOGV
-#define ALOGV ALOGD
 #define PARAM_MAX SNDRV_PCM_HW_PARAM_LAST_INTERVAL
+
+int64_t last_read_time = 0;
+
+static int64_t systemTime()
+{
+    struct timespec t;
+    t.tv_sec = t.tv_nsec = 0;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec*1000000000LL + t.tv_nsec;
+}
 
 static inline int param_is_mask(int p)
 {
@@ -189,17 +194,6 @@ static void param_dump(struct snd_pcm_hw_params *p) {}
 static void info_dump(struct snd_pcm_info *info) {}
 #endif
 
-#define PCM_ERROR_MAX 128
-
-struct pcm {
-    int fd;
-    unsigned flags;
-    int running:1;
-    int underruns;
-    unsigned buffer_size;
-    char error[PCM_ERROR_MAX];
-};
-
 unsigned pcm_buffer_size(struct pcm *pcm)
 {
     return pcm->buffer_size;
@@ -247,6 +241,21 @@ int pcm_write(struct pcm *pcm, void *data, unsigned count)
             return 0;
         }
         if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &x)) {
+#ifdef SUPPORT_USB
+            //usb sound card out, so sleep for data and return no error.
+            unsigned int usleep_time = 0;
+            unsigned int frames = (pcm->flags & PCM_MONO) ? (count / 2) : (count / 4);
+
+            if ((pcm->flags & PCM_RATE_MASK) == PCM_8000HZ)
+                usleep_time = frames * 1000 * 1000 / 8000;
+            else if ((pcm->flags & PCM_RATE_MASK) == PCM_48000HZ)
+                usleep_time = frames * 1000 * 1000 / 48000;
+            else
+                usleep_time = frames * 1000 * 1000 / 44100;
+            usleep(usleep_time);
+
+            return 0;
+#endif
             pcm->running = 0;
             if (errno == EPIPE) {
                     /* we failed to make our window -- try to restart */
@@ -276,7 +285,7 @@ int channalFlags = -1;//mean the channel is not checked now
 
 int startCheckCount = 0;
 
-int channel_check(void * data,int len )
+int channel_check(void * data, unsigned len)
 {
 	short * pcmLeftChannel = (short *)data;
 	short * pcmRightChannel = pcmLeftChannel+1;
@@ -293,11 +302,16 @@ int channel_check(void * data,int len )
 		
 		if((pcmLeftChannel[index] >= checkValue+50)||(pcmLeftChannel[index] <= checkValue-50))
 		{
-			leftValid = 0x01;
-			ALOGI("-->pcmLeftChannel[%d] = %d checkValue %d",index,pcmLeftChannel[index],checkValue);
-			break;
+			leftValid++;// = 0x01;
+		        //ALOGI("-->pcmLeftChannel[%d] = %d checkValue %d leftValid %d",index,pcmLeftChannel[index],checkValue,leftValid);
+			//break;
 		}	
 	}
+
+	if(leftValid >20)
+		leftValid = 0x01;
+	else
+		leftValid = 0;
 	checkValue = *pcmRightChannel;
 
 		//then check right 
@@ -306,16 +320,21 @@ int channel_check(void * data,int len )
 		
 		if((pcmRightChannel[index] >= checkValue+50)||(pcmRightChannel[index] <= checkValue-50))
 		{
-			rightValid = 0x02;
-			ALOGI("-->pcmRightChannel[%d] = %d checkValue %d",index,pcmRightChannel[index],checkValue);
-			break;
+			rightValid++;//= 0x02;
+			//ALOGI("-->pcmRightChannel[%d] = %d checkValue %d rightValid %d",index,pcmRightChannel[index],checkValue,rightValid);
+			//break;
 		}	
 	}
+
+	if(rightValid >20)
+		rightValid = 0x02;
+	else
+		rightValid = 0;
 	ALOGI("leftValid %d rightValid %d",leftValid,rightValid);
 	return leftValid|rightValid;
 }
 
-void channel_fixed(void * data,int len, int chFlag)
+void channel_fixed(void * data, unsigned len, int chFlag)
 {
 	//we just fixed when chFlag is 1 or 2.
 	if(chFlag <= 0 || chFlag > 2 )
@@ -333,20 +352,14 @@ void channel_fixed(void * data,int len, int chFlag)
 	
 	for(index = 0; index < len; index += 2)
 	{
-#ifndef TARGET_RK2928
 		pcmInvalid[index] = pcmValid[index];
-#else
-		int tmp = (int)pcmValid[index] + pcmValid[index]>>1;
-		//int tmp = (int)pcmValid[index] << 1;
-		pcmValid[index] = tmp > 32767 ? 32767 : (tmp < -32768 ? -32768 : tmp);
-		pcmInvalid[index] = pcmValid[index];
-#endif//TARGET_RK2928
 	}
 	return;
 }
 int pcm_read(struct pcm *pcm, void *data, unsigned count)
 {
     struct snd_xferi x;
+    int ret = 0;
 
     if (!(pcm->flags & PCM_IN))
         return -EINVAL;
@@ -364,6 +377,34 @@ int pcm_read(struct pcm *pcm, void *data, unsigned count)
             pcm->running = 1;
         }
         if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_READI_FRAMES, &x)) {
+//#ifdef SUPPORT_USB
+            if (((pcm->flags & PCM_CARD_MASK) >> PCM_CARD_SHIFT) == PCM_CARD2) {
+                //usb sound card out, so set data to 0, and sleep for data
+                int need_usleep_time;
+                unsigned int usleep_time = 0;
+                unsigned int frames = (pcm->flags & PCM_MONO) ? (count / 2) : (count / 4);
+
+                if ((pcm->flags & PCM_RATE_MASK) == PCM_8000HZ)
+                    usleep_time = frames * 1000 * 1000 / 8000;
+                else if ((pcm->flags & PCM_RATE_MASK) == PCM_48000HZ)
+                    usleep_time = frames * 1000 * 1000 / 48000;
+                else
+                    usleep_time = frames * 1000 * 1000 / 44100;
+
+                memset(data, 0, count);
+
+                if (last_read_time == 0)
+                    last_read_time = systemTime();
+
+                need_usleep_time = usleep_time - (systemTime() - last_read_time) / 1000;
+                if (need_usleep_time > 0)
+                    usleep(need_usleep_time);
+
+                last_read_time = systemTime();
+
+                return 0;
+            }
+//#endif
             pcm->running = 0;
             if (errno == EPIPE) {
                     /* we failed to make our window -- try to restart */
@@ -372,6 +413,7 @@ int pcm_read(struct pcm *pcm, void *data, unsigned count)
             }
             return oops(pcm, errno, "cannot read stream data");
         }
+        last_read_time = systemTime();
 //        ALOGV("read() got %d frames", x.frames);
 		if(!(pcm->flags & PCM_MONO))
 		{
@@ -402,6 +444,8 @@ static struct pcm bad_pcm = {
 
 int pcm_close(struct pcm *pcm)
 {
+    ALOGD("pcm_close()");
+
     if (pcm == &bad_pcm)
         return 0;
 
@@ -410,49 +454,58 @@ int pcm_close(struct pcm *pcm)
     pcm->running = 0;
     pcm->buffer_size = 0;
     pcm->fd = -1;
+    free(pcm);
     return 0;
 }
 
 struct pcm *pcm_open(unsigned flags)
 {
-    const char *dname;
+    const char *dfmt = "/dev/snd/pcmC%uD%u%c";
+    char dname[sizeof(dfmt) + 20];
     struct pcm *pcm;
     struct snd_pcm_info info;
     struct snd_pcm_hw_params params;
     struct snd_pcm_sw_params sparams;
+    unsigned card;
+    unsigned device;
     unsigned period_sz;
     unsigned period_cnt;
 
-    ALOGV("pcm_open(0x%08x)",flags);
+    ALOGD("pcm_open(0x%08x)", flags);
 
     pcm = calloc(1, sizeof(struct pcm));
     if (!pcm)
         return &bad_pcm;
 
-    if (flags & PCM_IN) {
-        dname = "/dev/snd/pcmC0D0c";
-		channalFlags = -1;
-		startCheckCount = 0;
-    } else {
-#ifdef SUPPORT_USB
-        dname = "/dev/snd/pcmC1D0p";
-#else
-		dname = "/dev/snd/pcmC0D0p";
-#endif
-    }
+__open_again:
 
-    ALOGV("pcm_open() period sz multiplier %d",
-         ((flags & PCM_PERIOD_SZ_MASK) >> PCM_PERIOD_SZ_SHIFT) + 1);
-    period_sz = PCM_PERIOD_SZ_MIN * (((flags & PCM_PERIOD_SZ_MASK) >> PCM_PERIOD_SZ_SHIFT) + 1);
-    ALOGV("pcm_open() period cnt %d",
-         ((flags & PCM_PERIOD_CNT_MASK) >> PCM_PERIOD_CNT_SHIFT) + PCM_PERIOD_CNT_MIN);
-    period_cnt = ((flags & PCM_PERIOD_CNT_MASK) >> PCM_PERIOD_CNT_SHIFT) + PCM_PERIOD_CNT_MIN;
+    card = (flags & PCM_CARD_MASK) >> PCM_CARD_SHIFT;
+    device = (flags & PCM_DEVICE_MASK) >> PCM_DEVICE_SHIFT;
+
+    sprintf(dname, dfmt, card, device, flags & PCM_IN ? 'c' : 'p');
+
+    ALOGD("pcm_open() card %u, device %u, %s",
+        card, device, (flags & PCM_IN) ? "Capture" : "Playback");
 
     pcm->flags = flags;
-    pcm->fd = open(dname, O_RDWR);
+    pcm->fd = open(dname, O_RDWR|O_CLOEXEC);
     if (pcm->fd < 0) {
         oops(pcm, errno, "cannot open device '%s'", dname);
+        if ((flags & PCM_CARD_MASK) == PCM_CARD1) {
+            ALOGD("Open sound card1 for HDMI error, open sound card0");
+            flags &= ~PCM_CARD_MASK;
+            goto __open_again;
+        }
         return pcm;
+    }
+
+    while(pcm->fd == 0 || pcm->fd == 1 || pcm->fd == 2)
+    {
+        ALOGD("pcm_open old_fd=%d",pcm->fd);
+        int tmp_fd = pcm->fd;
+        pcm->fd = dup(tmp_fd);
+        close(tmp_fd);
+        ALOGD("pcm_open new_fd=%d",pcm->fd);
     }
 
     if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_INFO, &info)) {
@@ -460,6 +513,13 @@ struct pcm *pcm_open(unsigned flags)
         goto fail;
     }
     info_dump(&info);
+
+    ALOGV("pcm_open() period sz multiplier %d",
+         ((flags & PCM_PERIOD_SZ_MASK) >> PCM_PERIOD_SZ_SHIFT) + 1);
+    period_sz = PCM_PERIOD_SZ_MIN * (((flags & PCM_PERIOD_SZ_MASK) >> PCM_PERIOD_SZ_SHIFT) + 1);
+    ALOGV("pcm_open() period cnt %d",
+         ((flags & PCM_PERIOD_CNT_MASK) >> PCM_PERIOD_CNT_SHIFT) + PCM_PERIOD_CNT_MIN);
+    period_cnt = ((flags & PCM_PERIOD_CNT_MASK) >> PCM_PERIOD_CNT_SHIFT) + PCM_PERIOD_CNT_MIN;
 
     ALOGV("pcm_open() period_cnt %d period_sz %d channels %d",
          period_cnt, period_sz, (flags & PCM_MONO) ? 1 : 2);
@@ -479,8 +539,14 @@ struct pcm *pcm_open(unsigned flags)
     param_set_int(&params, SNDRV_PCM_HW_PARAM_CHANNELS,
                   (flags & PCM_MONO) ? 1 : 2);
     param_set_int(&params, SNDRV_PCM_HW_PARAM_PERIODS, period_cnt);
-    param_set_int(&params, SNDRV_PCM_HW_PARAM_RATE, 44100);
-	
+    if ((flags & PCM_RATE_MASK) == PCM_8000HZ) {
+        ALOGD("set audio rate 8KHz");
+        param_set_int(&params, SNDRV_PCM_HW_PARAM_RATE, 8000);
+    } else if ((flags & PCM_RATE_MASK) == PCM_48000HZ) {
+        ALOGD("set audio rate 48KHz");
+        param_set_int(&params, SNDRV_PCM_HW_PARAM_RATE, 48000);
+    } else
+        param_set_int(&params, SNDRV_PCM_HW_PARAM_RATE, 44100);
 
     if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_HW_PARAMS, &params)) {
         oops(pcm, errno, "cannot set hw params");
@@ -501,6 +567,12 @@ struct pcm *pcm_open(unsigned flags)
     if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_SW_PARAMS, &sparams)) {
         oops(pcm, errno, "cannot set sw params");
         goto fail;
+    }
+
+    //Set prepare for device 1/2 of codec
+    if (device != 0 && card == 0) {
+        if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_PREPARE))
+            ALOGE("pcm_open() cannot set prepare for card %d, device %d", card, device);
     }
 
     pcm->buffer_size = period_cnt * period_sz;

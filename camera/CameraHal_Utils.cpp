@@ -54,7 +54,7 @@ extern "C" int capturePicture_cacheflush(int buf_type, int offset, int len)
         buf_type = JPEGBUFFER;
     }
 
-    cachMem->flushCacheMem((buffer_type_enum)buf_type,offset,len);
+    cachMem->flushCacheMem((buffer_type_enum)buf_type,0);
 
 	return ret;
 }
@@ -145,8 +145,109 @@ extern "C" int YUV420_rotate(const unsigned char* srcy, int src_stride,  unsigne
    
   return 0;
  }
+
+extern "C" int rk_camera_zoom_ipp(int v4l2_fmt_src, int srcbuf, int src_w, int src_h,int dstbuf,int zoom_value, bool aligned16b)
+{
+	int vipdata_base;
+
+	struct rk29_ipp_req ipp_req;
+	int src_y_offset,src_uv_offset,dst_y_offset,dst_uv_offset,src_y_size,dst_y_size;
+	int scale_w_times =0,scale_h_times = 0,w,h;
+	int ret = 0;
+	int ippFd = -1;
+	int ratio = 0;
+	int top_offset=0,left_offset=0;
+	int cropW,cropH;
+
+
+	if((ippFd = open("/dev/rk29-ipp",O_RDWR)) < 0) {
+		LOGE("%s(%d):open rga device failed!!",__FUNCTION__,__LINE__);
+		ret = -1;
+		goto do_ipp_err;
+	}
+
+	/*
+	*ddl@rock-chips.com: 
+	* IPP Dest image resolution is 2047x1088, so scale operation break up some times
+	*/
+	if ((src_w > 0x7f0) || (src_h > 0x430)) {
+		scale_w_times = ((src_w/0x7f0)>(src_h/0x430))?(src_w/0x7f0):(src_h/0x430); 
+		scale_h_times = scale_w_times;
+		scale_w_times++;
+		scale_h_times++;
+	} else {
+		scale_w_times = 1;
+		scale_h_times = 1;
+	}
+	memset(&ipp_req, 0, sizeof(struct rk29_ipp_req));
+
+	//compute zoom 
+	cropW = (src_w*100/zoom_value)& (~0x03);
+	cropH = (src_h*100/zoom_value)& (~0x03);
+	left_offset=MAX((((src_w-cropW)>>1)-1),0);
+	top_offset=MAX((((src_h-cropH)>>1)-1),0);
+	left_offset &= ~0x01; 
+	top_offset &=~0x01;
+
+	ipp_req.timeout = 3000;
+	ipp_req.flag = IPP_ROT_0; 
+	ipp_req.store_clip_mode =1;
+	ipp_req.src0.w = cropW/scale_w_times;
+	ipp_req.src0.h = cropH/scale_h_times;
+	ipp_req.src_vir_w = src_w;
+	ipp_req.src0.fmt = IPP_Y_CBCR_H2V2;
+	ipp_req.dst0.w = src_w/scale_w_times;
+	ipp_req.dst0.h = src_h/scale_h_times;
+	ipp_req.dst_vir_w = src_w;	 
+	ipp_req.dst0.fmt = IPP_Y_CBCR_H2V2;
+	vipdata_base = srcbuf;
+	if(aligned16b){
+		src_y_size = ((src_w+15)&0xFFF0)*((src_h+15)&0xFFF0);
+	}
+	else{
+		src_y_size = src_w*src_h;
+	}
+	dst_y_size = src_w*src_h;
+
+	for (h=0; h<scale_h_times; h++) {
+		for (w=0; w<scale_w_times; w++) {
+			int ipp_times = 3;
+			src_y_offset = (top_offset + h*cropH/scale_h_times)* src_w 
+						+ left_offset + w*cropW/scale_w_times;
+			src_uv_offset = (top_offset + h*cropH/scale_h_times)* src_w/2
+						+ left_offset + w*cropW/scale_w_times;
+
+			dst_y_offset = src_w*src_h*h/scale_h_times + src_w*w/scale_w_times;
+			dst_uv_offset = src_w*src_h*h/scale_h_times/2 + src_w*w/scale_w_times;
+
+			ipp_req.src0.YrgbMst = vipdata_base + src_y_offset;
+			ipp_req.src0.CbrMst = vipdata_base + src_y_size + src_uv_offset;
+			ipp_req.dst0.YrgbMst = dstbuf + dst_y_offset;
+			ipp_req.dst0.CbrMst = dstbuf + dst_y_size + dst_uv_offset;
+			while(ipp_times-- > 0) {
+				if (ioctl(ippFd,IPP_BLIT_SYNC,&ipp_req)){
+					LOGE("ipp do erro,do again,ipp_times = %d!\n",ipp_times);
+				 } else {
+					break;
+				 }
+			}
+			if (ipp_times <= 0) {
+				ret = -1;
+				goto do_ipp_err;
+			}
+		}
+	}
+do_ipp_err:
+	if(ippFd > 0)
+	   close(ippFd);
+	
+	return ret;    
+}
+
+
+
 /*fill in jpeg gps information*/  
-int CameraHal::Jpegfillgpsinfo(RkGPSInfo *gpsInfo)
+int CameraHal::Jpegfillgpsinfo(RkGPSInfo *gpsInfo,CameraParameters &params)
 {
 	char* gpsprocessmethod = NULL;
     double latitude,longtitude,altitude;
@@ -165,7 +266,7 @@ int CameraHal::Jpegfillgpsinfo(RkGPSInfo *gpsInfo)
     latitude = mGps_latitude;
     longtitude = mGps_longitude;
     timestamp = mGps_timestamp; 
-    gpsprocessmethod = (char*)mParameters.get(CameraParameters::KEY_GPS_PROCESSING_METHOD);
+    gpsprocessmethod = (char*)params.get(CameraParameters::KEY_GPS_PROCESSING_METHOD);
     
     if(latitude >= 0){
     	gpsInfo->GPSLatitudeRef[0] = 'N';
@@ -253,7 +354,7 @@ int CameraHal::Jpegfillgpsinfo(RkGPSInfo *gpsInfo)
 }
 
 
-int CameraHal::Jpegfillexifinfo(RkExifInfo *exifInfo)
+int CameraHal::Jpegfillexifinfo(RkExifInfo *exifInfo,CameraParameters &params)
 {
     char property[PROPERTY_VALUE_MAX];
     int jpeg_w,jpeg_h;
@@ -265,21 +366,21 @@ int CameraHal::Jpegfillexifinfo(RkExifInfo *exifInfo)
     }
 
     /*get some current relavant  parameters*/
-    mParameters.getPictureSize(&jpeg_w, &jpeg_h);
-    focalen = strtol(mParameters.get(CameraParameters::KEY_FOCAL_LENGTH),0,0);
+    params.getPictureSize(&jpeg_w, &jpeg_h);
+    focalen = strtol(params.get(CameraParameters::KEY_FOCAL_LENGTH),0,0);
     
     /*fill in jpeg exif tag*/  
     property_get("ro.product.brand", property, EXIF_DEF_MAKER);
     strncpy((char *)ExifMaker, property,sizeof(ExifMaker) - 1);
     ExifMaker[sizeof(ExifMaker) - 1] = '\0';
  	exifInfo->maker = ExifMaker;
-	exifInfo->makerchars = strlen(ExifMaker);
+	exifInfo->makerchars = strlen(ExifMaker)+1;
     
     property_get("ro.product.model", property, EXIF_DEF_MODEL);
     strncpy((char *)ExifModel, property,sizeof(ExifModel) - 1);
     ExifModel[sizeof(ExifModel) - 1] = '\0';
 	exifInfo->modelstr = ExifModel;
-	exifInfo->modelchars = strlen(ExifModel);  
+	exifInfo->modelchars = strlen(ExifModel)+1;  
     
 	exifInfo->Orientation = 1;
 
@@ -307,8 +408,8 @@ int CameraHal::Jpegfillexifinfo(RkExifInfo *exifInfo)
 	exifInfo->MaxApertureValue.denom = 0x100;
 	exifInfo->MeteringMode = 02;
 
-    if (mParameters.get(CameraParameters::KEY_SUPPORTED_FLASH_MODES)) {
-        if (!strcmp(CameraParameters::FLASH_MODE_OFF, mParameters.get(CameraParameters::KEY_FLASH_MODE))) {
+    if (params.get(CameraParameters::KEY_SUPPORTED_FLASH_MODES)) {
+        if (!strcmp(CameraParameters::FLASH_MODE_OFF, params.get(CameraParameters::KEY_FLASH_MODE))) {
 	        exifInfo->Flash = 0;
         } else {
             exifInfo->Flash = 0;
@@ -328,8 +429,8 @@ int CameraHal::Jpegfillexifinfo(RkExifInfo *exifInfo)
 	exifInfo->FileSource = 3;
 	exifInfo->CustomRendered = 1;
 	exifInfo->ExposureMode = 0;
-    if (mParameters.get(CameraParameters::KEY_SUPPORTED_WHITE_BALANCE)) {
-        if (!strcmp(CameraParameters::WHITE_BALANCE_AUTO, mParameters.get(CameraParameters::KEY_WHITE_BALANCE))) {
+    if (params.get(CameraParameters::KEY_SUPPORTED_WHITE_BALANCE)) {
+        if (!strcmp(CameraParameters::WHITE_BALANCE_AUTO, params.get(CameraParameters::KEY_WHITE_BALANCE))) {
 	        exifInfo->WhiteBalance = 0;
         } else {
             exifInfo->WhiteBalance = 1;
@@ -415,33 +516,37 @@ int CameraHal::capturePicture(struct CamCaptureInfo_s *capture)
     bool driver_mirror_fail = false;
     struct v4l2_control control;
     JpegEncType encodetype;
-    
+    CameraParameters params;
+	bool aligned16b = false;
+
+    cameraParametersGet(params);             /* ddl@rock-chips.com: v0.4.5 */      
      /*get jpeg and thumbnail information*/
-    mParameters.getPictureSize(&jpeg_w, &jpeg_h);                
-    quality = mParameters.getInt("jpeg-quality");
-    rotation = strtol(mParameters.get(CameraParameters::KEY_ROTATION),0,0);
-    thumbquality = strtol(mParameters.get(CameraParameters::KEY_JPEG_THUMBNAIL_QUALITY),0,0);
-    thumbwidth = strtol(mParameters.get(CameraParameters::KEY_JPEG_THUMBNAIL_WIDTH),0,0);
-    thumbheight = strtol(mParameters.get(CameraParameters::KEY_JPEG_THUMBNAIL_HEIGHT),0,0);
+    params.getPictureSize(&jpeg_w, &jpeg_h);                
+    quality = params.getInt("jpeg-quality");
+    rotation = strtol(params.get(CameraParameters::KEY_ROTATION),0,0);
+    thumbquality = strtol(params.get(CameraParameters::KEY_JPEG_THUMBNAIL_QUALITY),0,0);
+    thumbwidth = strtol(params.get(CameraParameters::KEY_JPEG_THUMBNAIL_WIDTH),0,0);
+    thumbheight = strtol(params.get(CameraParameters::KEY_JPEG_THUMBNAIL_HEIGHT),0,0);
     /*get gps information*/
     altitude = mGps_altitude;
     latitude = mGps_latitude;
     longtitude = mGps_longitude;
     timestamp = mGps_timestamp;    
-    getMethod = (char*)mParameters.get(CameraParameters::KEY_GPS_PROCESSING_METHOD);//getMethod : len <= 32
+    getMethod = (char*)params.get(CameraParameters::KEY_GPS_PROCESSING_METHOD);//getMethod : len <= 32
     if (pictureSize & 0xfff) {
         pictureSize = (pictureSize & 0xfffff000) + 0x1000;
     }
 	
 	cachMem = this->mCamBuffer;
-    if (pictureSize > mCamBuffer->getRawBufInfo().mBufferSizes) {
+    if (pictureSize > mCamBuffer->getRawBufInfo()->mBufferSizes) {
         LOGE("%s(%d): mRawBuffer(size:0x%x) is not enough for this resolution picture(%dx%d, size:0x%x)",
-            __FUNCTION__, __LINE__,mCamBuffer->getRawBufInfo().mBufferSizes, jpeg_w, jpeg_h, pictureSize);
+            __FUNCTION__, __LINE__,mCamBuffer->getRawBufInfo()->mBufferSizes, jpeg_w, jpeg_h, pictureSize);
         err = -1;
         goto exit;
     } else {
         LOGD("%s(%d): %dx%d quality(%d) rotation(%d)",__FUNCTION__,__LINE__, jpeg_w, jpeg_h,quality,rotation);
     }
+	#if 0
     i = 0;
     while (mCamDriverSupportFmt[i]) {
         if (mCamDriverSupportFmt[i] == mCamDriverPictureFmt)
@@ -454,6 +559,9 @@ int CameraHal::capturePicture(struct CamCaptureInfo_s *capture)
     } else {
         picture_format = mCamDriverPictureFmt;
     }
+	#else
+	picture_format = mCamDriverPreviewFmt; 
+	#endif
 	if(mCamDriverPictureFmt ==V4L2_PIX_FMT_RGB565){
 		encodetype = HWJPEGENC_RGB565;
 		pictureSize = jpeg_w * jpeg_h *2;
@@ -477,7 +585,7 @@ int CameraHal::capturePicture(struct CamCaptureInfo_s *capture)
     }
     mPictureLock.unlock();
 
-    err = cameraSetSize(jpeg_w, jpeg_h, picture_format);
+    err = cameraSetSize(jpeg_w, jpeg_h, picture_format,true);
     if (err < 0) {
 		LOGE ("CapturePicture failed to set VIDIOC_S_FMT.");
 		goto exit;
@@ -564,9 +672,11 @@ int CameraHal::capturePicture(struct CamCaptureInfo_s *capture)
     mPictureLock.unlock();
 
     if (CAMERA_IS_UVC_CAMERA()) {
-        for (i=0; i<4; i++) {
-            ioctl(iCamFd, VIDIOC_DQBUF, &buffer);
-            ioctl(iCamFd, VIDIOC_QBUF, &buffer);
+        if (strcmp(cameraCallProcess,"com.android.cts.stub")) {
+            for (i=0; i<CONFIG_CAMERA_UVC_INVAL_FRAMECNT; i++) {
+                ioctl(iCamFd, VIDIOC_DQBUF, &buffer);
+                ioctl(iCamFd, VIDIOC_QBUF, &buffer);
+            }
         }
     }
 
@@ -597,34 +707,40 @@ capturePicture_streamoff:
         goto exit;
     }
     mPictureLock.unlock();
-    
-    cameraFormatConvert(picture_format, mCamDriverPictureFmt, NULL,
-        (char*)camDriverV4l2Buffer,(char*)(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir),0,0, jpeg_w, jpeg_h,jpeg_w, jpeg_h,false);
+	if (CAMERA_IS_UVC_CAMERA()) {
+	    if (cameraFormatConvert(picture_format, mCamDriverPictureFmt, NULL,
+	        (char*)camDriverV4l2Buffer,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 1, buffer_addr_vir),
+	        0,mCamBuffer->getBufferAddr(RAWBUFFER, 1, buffer_addr_phy),buffer.bytesused,
+	        jpeg_w, jpeg_h,jpeg_w,
+	        jpeg_w, jpeg_h,jpeg_w,
+	        false) == 0) {
+	        mCamBuffer->flushCacheMem(RAWBUFFER,1); 
+			if(picture_format == V4L2_PIX_FMT_MJPEG){
+				aligned16b = true;
+			}	
+			rk_camera_zoom_ipp(V4L2_PIX_FMT_NV12, mCamBuffer->getBufferAddr(RAWBUFFER, 1, buffer_addr_phy), 
+			                    jpeg_w, jpeg_h,
+			                    mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_phy),uvcZoomVal,aligned16b);
+			
+	        mCamBuffer->flushCacheMem(RAWBUFFER,0); 
+	    }
+	} else {
+	    if (cameraFormatConvert(picture_format, mCamDriverPictureFmt, NULL,
+	        (char*)camDriverV4l2Buffer,(char*)(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir),0,0,buffer.bytesused,
+	        jpeg_w, jpeg_h,jpeg_w,
+	        jpeg_w, jpeg_h,jpeg_w,
+	        false) == 0) {
+            mCamBuffer->flushCacheMem(RAWBUFFER,0);  /* ddl@rock-chips.com: v0.4.0x11 */
+	    }
+	}
 
-    if (mCamDriverV4l2MemType == V4L2_MEMORY_MMAP) {
-        if (camDriverV4l2Buffer != NULL) {
-            if (munmap((void*)camDriverV4l2Buffer, buffer.length) < 0)
-                LOGE("%s camDriverV4l2Buffer munmap failed : %s",__FUNCTION__,strerror(errno));
-            camDriverV4l2Buffer = NULL;
-        }
-    }
 
-    /* ddl@rock-chips.com: Release v4l2 buffer must by close device, buffer isn't release in VIDIOC_STREAMOFF ioctl */
-    if (CAMERA_IS_UVC_CAMERA()) {
-        close(iCamFd);
-        iCamFd = open(cameraDevicePathCur, O_RDWR);
-        if (iCamFd < 0) {
-            LOGE ("%s[%d]-Could not open the camera device(%s): %s",__FUNCTION__,__LINE__, cameraDevicePathCur, strerror(errno) );
-            err = -1;
-            goto exit;
-        }
-    }
     
     if (rotation == 180) {
         if (driver_mirror_fail == true) {
             YuvData_Mirror_Flip(mCamDriverPictureFmt,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir), 
                 (char*)mCamBuffer->getBufferAddr(JPEGBUFFER, 0, buffer_addr_vir), jpeg_w,jpeg_h);
-            mCamBuffer->flushCacheMem(RAWBUFFER,0,mCamBuffer->getRawBufInfo().mBufferSizes);
+            mCamBuffer->flushCacheMem(RAWBUFFER,0);
         } else {
             if (mDriverFlipSupport && mDriverMirrorSupport) {  
                 control.id = V4L2_CID_HFLIP;
@@ -640,47 +756,30 @@ capturePicture_streamoff:
     copyAndSendRawImage((void*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir), pictureSize);
 
     JpegInInfo.frameHeader = 1;
-    if(access(CAMERA_IPP_NAME, O_RDWR) < 0) {
-    	JpegInInfo.rotateDegree = DEGREE_0;
-    	if ((rotation != 0) && (rotation != 180)) {
-			int src_base = mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir);
-			YUV420_rotate((unsigned char*)src_base ,jpeg_w, (unsigned char*)src_base+jpeg_w*jpeg_h,
-                   (unsigned char*)src_base+pictureSize, jpeg_h,(unsigned char*)src_base+pictureSize+jpeg_w*jpeg_h,jpeg_w, jpeg_h,rotation);
-			mCamBuffer->flushCacheMem(RAWBUFFER,0,mCamBuffer->getRawBufInfo().mBufferSizes);
-    		capture->input_phy_addr += pictureSize;
-			capture->input_vir_addr += pictureSize;
-			}
-     }else{
-    	    if ((rotation == 0) || (rotation == 180)) {
-    	        JpegInInfo.rotateDegree = DEGREE_0;        
-    	    } else if (rotation == 90) {
-    	        if(jpeg_w %16 != 0 || jpeg_h %16 != 0){
-    				YuvData_Mirror_Flip(mCamDriverPictureFmt,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir), 
-    						(char*)mCamBuffer->getBufferAddr(JPEGBUFFER, 0, buffer_addr_vir), jpeg_w, jpeg_h);
-    	            mCamBuffer->flushCacheMem(RAWBUFFER,0,mCamBuffer->getRawBufInfo().mBufferSizes);
-    				JpegInInfo.rotateDegree = DEGREE_270;
-    			}else{
-    				JpegInInfo.rotateDegree = DEGREE_90;
-    			}
-    	    } else if (rotation == 270) {
-    	        JpegInInfo.rotateDegree = DEGREE_270; 
-    	    }
-     	}
+    
+    if ((rotation == 0) || (rotation == 180)) {
+        JpegInInfo.rotateDegree = DEGREE_0;        
+    } else if (rotation == 90) {
+        if(jpeg_w %16 != 0 || jpeg_h %16 != 0){
+			YuvData_Mirror_Flip(mCamDriverPictureFmt,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir), 
+					(char*)mCamBuffer->getBufferAddr(JPEGBUFFER, 0, buffer_addr_vir), jpeg_w, jpeg_h);
+            mCamBuffer->flushCacheMem(RAWBUFFER,0);
+			JpegInInfo.rotateDegree = DEGREE_270;
+		}else{
+			JpegInInfo.rotateDegree = DEGREE_90;
+		}
+    } else if (rotation == 270) {
+        JpegInInfo.rotateDegree = DEGREE_270; 
+    }
 
     JpegInInfo.yuvaddrfor180 = NULL;
     JpegInInfo.type = encodetype;
 	JpegInInfo.y_rgb_addr = capture->input_phy_addr;
 	JpegInInfo.uv_addr = capture->input_phy_addr + jpeg_w*jpeg_h;
-	if ((rotation == 0) || (rotation == 180)) {
+/* ddl@rock-chips.con : v0.4.1 fix rk2928 rotate 90 and 270 */
     JpegInInfo.inputW = jpeg_w;
     JpegInInfo.inputH = jpeg_h;
-	}else if(access(CAMERA_IPP_NAME, O_RDWR) < 0){
-    JpegInInfo.inputW = jpeg_h;
-    JpegInInfo.inputH = jpeg_w;
-	}else{
-	JpegInInfo.inputW = jpeg_w;
-    JpegInInfo.inputH = jpeg_h;
-	}
+    
     JpegInInfo.qLvl = quality/10;
     if (JpegInInfo.qLvl < 5) {
         JpegInInfo.qLvl = 5;
@@ -705,11 +804,12 @@ capturePicture_streamoff:
     }else{    
         JpegInInfo.doThumbNail = 0;          //insert thumbnail at APP0 extension   
     }
-    
-    Jpegfillexifinfo(&exifInfo);
+	
+    memset(&exifInfo,0,sizeof(exifInfo));
+    Jpegfillexifinfo(&exifInfo,params);
     JpegInInfo.exifInfo =&exifInfo;
     if((longtitude!=-1)&& (latitude!=-1)&&(timestamp!=-1)&&(getMethod!=NULL)) {    
-        Jpegfillgpsinfo(&gpsInfo);  
+        Jpegfillgpsinfo(&gpsInfo,params);  
         memset(gpsprocessmethod,0,45);   
         memcpy(gpsprocessmethod,ExifAsciiPrefix,8);   
         memcpy(gpsprocessmethod+8,getMethod,strlen(getMethod)+1);          
@@ -747,13 +847,32 @@ capturePicture_streamoff:
     }
 
 exit:   
-		if(err < 0)
-			{
-				LOGE("%s(%d) take picture erro!!!,",__FUNCTION__,__LINE__);
-		    if (mNotifyCb && (mMsgEnabled & CAMERA_MSG_ERROR)) {                        
-             mNotifyCb(CAMERA_MSG_ERROR, CAMERA_ERROR_SERVER_DIED,0,mCallbackCookie);
+    if(err < 0) {
+        LOGE("%s(%d) take picture erro!!!,",__FUNCTION__,__LINE__);
+        if (mNotifyCb && (mMsgEnabled & CAMERA_MSG_ERROR)) {                        
+            mNotifyCb(CAMERA_MSG_ERROR, CAMERA_ERROR_SERVER_DIED,0,mCallbackCookie);
         }
-			}
+    }
+
+    /* ddl@rock-chips.com: v0.4.11 */
+    /* ddl@rock-chips.com: Release v4l2 buffer must by close device, buffer isn't release in VIDIOC_STREAMOFF ioctl */
+    if (CAMERA_IS_UVC_CAMERA()) {
+		if (mCamDriverV4l2MemType == V4L2_MEMORY_MMAP) {
+        	if (camDriverV4l2Buffer != NULL) {
+            	if (munmap((void*)camDriverV4l2Buffer, buffer.length) < 0)
+                	LOGE("%s camDriverV4l2Buffer munmap failed : %s",__FUNCTION__,strerror(errno));
+            		camDriverV4l2Buffer = NULL;
+        		}
+    		}
+        close(iCamFd);
+        iCamFd = open(cameraDevicePathCur, O_RDWR);
+        if (iCamFd < 0) {
+            LOGE ("%s[%d]-Could not open the camera device(%s): %s",__FUNCTION__,__LINE__, cameraDevicePathCur, strerror(errno) );
+            err = -1;
+            goto exit;
+        }
+    }
+    
     return err;
 }
 
@@ -780,25 +899,28 @@ int CameraHal::captureVideoPicture(struct CamCaptureInfo_s *capture, int index)
     char *getMethod = NULL;
     double latitude,longtitude,altitude;
     long timestamp;
-    bool driver_mirror_fail = false;
     struct Message msg;
 	JpegEncType encodetype;
+    CameraParameters params;
+
+    cameraParametersGet(params); 
+    
     if (mMsgEnabled & CAMERA_MSG_SHUTTER)
         mNotifyCb(CAMERA_MSG_SHUTTER, 0, 0, mCallbackCookie);
     
      /*get jpeg and thumbnail information*/
-    mParameters.getPreviewSize(&jpeg_w, &jpeg_h); 
-    quality = mParameters.getInt("jpeg-quality");
-    rotation = strtol(mParameters.get(CameraParameters::KEY_ROTATION),0,0);
-    thumbquality = strtol(mParameters.get(CameraParameters::KEY_JPEG_THUMBNAIL_QUALITY),0,0);
-    thumbwidth = strtol(mParameters.get(CameraParameters::KEY_JPEG_THUMBNAIL_WIDTH),0,0);
-    thumbheight = strtol(mParameters.get(CameraParameters::KEY_JPEG_THUMBNAIL_HEIGHT),0,0);
+    params.getPreviewSize(&jpeg_w, &jpeg_h); 
+    quality = params.getInt("jpeg-quality");
+    rotation = strtol(params.get(CameraParameters::KEY_ROTATION),0,0);
+    thumbquality = strtol(params.get(CameraParameters::KEY_JPEG_THUMBNAIL_QUALITY),0,0);
+    thumbwidth = strtol(params.get(CameraParameters::KEY_JPEG_THUMBNAIL_WIDTH),0,0);
+    thumbheight = strtol(params.get(CameraParameters::KEY_JPEG_THUMBNAIL_HEIGHT),0,0);
     /*get gps information*/
     altitude = mGps_altitude;
     latitude = mGps_latitude;
     longtitude = mGps_longitude;
     timestamp = mGps_timestamp;    
-    getMethod = (char*)mParameters.get(CameraParameters::KEY_GPS_PROCESSING_METHOD);//getMethod : len <= 32
+    getMethod = (char*)params.get(CameraParameters::KEY_GPS_PROCESSING_METHOD);//getMethod : len <= 32
 	
 	cachMem = this->mCamBuffer;
     if (pictureSize & 0xfff) {
@@ -812,69 +934,52 @@ int CameraHal::captureVideoPicture(struct CamCaptureInfo_s *capture, int index)
 		encodetype = JPEGENC_YUV420_SP;
 		pictureSize = jpeg_w * jpeg_h * 3/2;
 		}
-    if (mCamDriverPreviewFmt != mCamDriverPictureFmt) {
-    	if (CAMERA_IS_RKSOC_CAMERA()) {
-        cameraFormatConvert(mCamDriverPreviewFmt, mCamDriverPictureFmt, NULL,
-            (char*)capture->input_vir_addr,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir),0,0, jpeg_w, jpeg_h, jpeg_w, jpeg_h,false);
-      } else if (CAMERA_IS_UVC_CAMERA()) {
-            if (V4L2_PIX_FMT_NV12!= mCamDriverPreviewFmt) {
-                cameraFormatConvert(V4L2_PIX_FMT_NV12, mCamDriverPictureFmt, NULL,
-                    (char*)capture->input_vir_addr,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir),0,0, 
-                    jpeg_w, jpeg_h,
-                   jpeg_w, jpeg_h,
-                    false);
-                    
+    /*ddl@rock-chips.com: v0.4.7*/    
+    if ((mCamDriverPreviewFmt != mCamDriverPictureFmt)||(rotation == 180)) {
+        if (CAMERA_IS_RKSOC_CAMERA()) {
+            if (cameraFormatConvert(mCamDriverPreviewFmt, mCamDriverPictureFmt, NULL,
+                (char*)capture->input_vir_addr,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir),0,0, mPreviewFrameSize,
+                jpeg_w, jpeg_h,jpeg_w, 
+                jpeg_w, jpeg_h,jpeg_w,
+                false) == 0)
+                mCamBuffer->flushCacheMem(RAWBUFFER,0);
+        } else if (CAMERA_IS_UVC_CAMERA()) {            
+            if (V4L2_PIX_FMT_NV12!= mCamDriverPreviewFmt) {  /* ddl@rock-chips.com: v0.4.15 */   
+                if (cameraFormatConvert(V4L2_PIX_FMT_NV12, mCamDriverPictureFmt, NULL,
+                    (char*)capture->input_vir_addr,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir),0,0,mPreviewFrameSize, 
+                    jpeg_w, jpeg_h,jpeg_w, 
+                    jpeg_w, jpeg_h,jpeg_w,
+                    false)==0)
+                    mCamBuffer->flushCacheMem(RAWBUFFER,0);
+
             }
         }
-     
         capture->input_phy_addr = mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_phy);
         capture->input_vir_addr = (int)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir);
     }
-    
-    if (rotation == 180) {
-        if (driver_mirror_fail == true) {
-            YuvData_Mirror_Flip(mCamDriverPictureFmt,(char*)capture->input_vir_addr, (char*)mCamBuffer->getBufferAddr(JPEGBUFFER, 0, buffer_addr_vir), jpeg_w,jpeg_h);  
-        }
-    }
-
     copyAndSendRawImage((void*)capture->input_vir_addr, pictureSize);
 
     JpegInInfo.frameHeader = 1;
-    if(access(CAMERA_IPP_NAME, O_RDWR) < 0) {
-    	JpegInInfo.rotateDegree = DEGREE_0;
-    	if ((rotation != 0) && (rotation != 180)) {
-			int src_base = capture->input_vir_addr;
-			int dst_base = (int)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir);
-            YUV420_rotate((unsigned char*)src_base ,jpeg_w, (unsigned char*)src_base+jpeg_w*jpeg_h,
-                   (unsigned char*)dst_base, jpeg_h,(unsigned char*)dst_base+jpeg_w*jpeg_h,jpeg_w, jpeg_h,rotation);
-            mCamBuffer->flushCacheMem(RAWBUFFER,0,mCamBuffer->getRawBufInfo().mBufferSizes);
-			capture->input_phy_addr = (int)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_phy);
-			capture->input_vir_addr = (int)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir);	
-		}
-     }else{
-    	    if ((rotation == 0) || (rotation == 180)) {
-    	        JpegInInfo.rotateDegree = DEGREE_0;        
-    	    } else if (rotation == 90) {
-    	        JpegInInfo.rotateDegree = DEGREE_90;
-    	    } else if (rotation == 270) {
-    	        JpegInInfo.rotateDegree = DEGREE_270; 
-    	    }
-     	}
-    JpegInInfo.yuvaddrfor180 = NULL;
+	JpegInInfo.yuvaddrfor180 = NULL;
+    if ((rotation == 0) ){
+	    JpegInInfo.rotateDegree = DEGREE_0;    
+    }else if(rotation == 180){
+	    JpegInInfo.rotateDegree = DEGREE_0;
+        YuvData_Mirror_Flip(mCamDriverPictureFmt,(char*)mCamBuffer->getBufferAddr(RAWBUFFER, 0, buffer_addr_vir), 
+            (char*)mCamBuffer->getBufferAddr(JPEGBUFFER, 0, buffer_addr_vir), jpeg_w,jpeg_h);
+        mCamBuffer->flushCacheMem(RAWBUFFER,0);
+    }else if (rotation == 90) {
+        JpegInInfo.rotateDegree = DEGREE_90;
+    } else if (rotation == 270) {
+        JpegInInfo.rotateDegree = DEGREE_270; 
+    }
 
     JpegInInfo.type = encodetype;
     JpegInInfo.y_rgb_addr = capture->input_phy_addr;
-    JpegInInfo.uv_addr = capture->input_phy_addr + jpeg_w*jpeg_h;
-    if ((rotation == 0) || (rotation == 180)) {
+    JpegInInfo.uv_addr = capture->input_phy_addr + jpeg_w*jpeg_h;    
     JpegInInfo.inputW = jpeg_w;
     JpegInInfo.inputH = jpeg_h;
-    }else if(access(CAMERA_IPP_NAME, O_RDWR) < 0){
-    JpegInInfo.inputW = jpeg_h;
-    JpegInInfo.inputH = jpeg_w;
-    }else{
-	JpegInInfo.inputW = jpeg_w;
-    JpegInInfo.inputH = jpeg_h;
-	}
+    
 	JpegInInfo.qLvl = quality/10;
     if (JpegInInfo.qLvl < 5) {
         JpegInInfo.qLvl = 5;
@@ -898,11 +1003,12 @@ int CameraHal::captureVideoPicture(struct CamCaptureInfo_s *capture, int index)
     }else{    
         JpegInInfo.doThumbNail = 0;          //insert thumbnail at APP0 extension   
     }
-    
-    Jpegfillexifinfo(&exifInfo);
+
+	memset(&exifInfo,0,sizeof(exifInfo));
+    Jpegfillexifinfo(&exifInfo,params);
     JpegInInfo.exifInfo =&exifInfo;
     if((longtitude!=-1)&& (latitude!=-1)&&(timestamp!=-1)&&(getMethod!=NULL)) {    
-        Jpegfillgpsinfo(&gpsInfo);  
+        Jpegfillgpsinfo(&gpsInfo,params);  
         memset(gpsprocessmethod,0,45);   
         memcpy(gpsprocessmethod,ExifAsciiPrefix,8);   
         memcpy(gpsprocessmethod+8,getMethod,strlen(getMethod)+1);          
@@ -919,7 +1025,7 @@ int CameraHal::captureVideoPicture(struct CamCaptureInfo_s *capture, int index)
     JpegOutInfo.outBuflen = capture->output_buflen;
     JpegOutInfo.jpegFileLen = 0x00;
     JpegOutInfo.cacheflush= &capturePicture_cacheflush;
-    	
+    
     err = hw_jpeg_encode(&JpegInInfo, &JpegOutInfo);
 
     cameraPreviewBufferSetSta(mPreviewBufferMap[index], CMD_PREVIEWBUF_SNAPSHOT_ENCING, 0);    
@@ -941,13 +1047,12 @@ int CameraHal::captureVideoPicture(struct CamCaptureInfo_s *capture, int index)
         copyAndSendCompressedImage((void*)JpegOutInfo.outBufVirAddr,JpegOutInfo.jpegFileLen);       
     }
 exit:  
-			if(err < 0)
-			{
-				LOGE("%s(%d) take picture erro!!!,",__FUNCTION__,__LINE__);
-		    if (mNotifyCb && (mMsgEnabled & CAMERA_MSG_ERROR)) {                        
-             mNotifyCb(CAMERA_MSG_ERROR, CAMERA_ERROR_SERVER_DIED,0,mCallbackCookie);
+    if(err < 0) {
+        LOGE("%s(%d) take picture erro!!!,",__FUNCTION__,__LINE__);
+        if (mNotifyCb && (mMsgEnabled & CAMERA_MSG_ERROR)) {                        
+            mNotifyCb(CAMERA_MSG_ERROR, CAMERA_ERROR_SERVER_DIED,0,mCallbackCookie);
         }
-			} 
+    } 
 return err;
 
 }

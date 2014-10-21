@@ -27,8 +27,8 @@
 #include <binder/IPCThreadState.h>
 #include "CameraHal.h"
 #include "CameraHal_Module.h"
-
-
+#include "CameraHal_MediaProfile.cpp"
+#include <time.h>
 
 rk_cam_info_t gCamInfos[CAMERAS_SUPPORT_MAX];
 static android::CameraHal* gCameraHals[CAMERAS_SUPPORT_MAX];
@@ -600,7 +600,15 @@ int camera_get_number_of_cameras(void)
     char version[PROPERTY_VALUE_MAX];
     char property[PROPERTY_VALUE_MAX];
     int hwrotation = 0;
-    
+
+	//oyyf@rock-chips.com:  modify /data/media_profiles.xml
+	struct timeval t0, t1;
+    ::gettimeofday(&t0, NULL);
+	media_profiles_xml_control();
+	::gettimeofday(&t1, NULL);
+	LOGD("meida_profiles_xml_control time (%ld)us\n", (t1.tv_sec*1000000 + t1.tv_usec) - (t0.tv_sec*1000000 + t0.tv_usec));
+
+	
     if (gCamerasNumber > 0)
         goto camera_get_number_of_cameras_end;
     
@@ -618,8 +626,10 @@ int camera_get_number_of_cameras(void)
         sprintf(cam_num, "%d", i);
         strcat(cam_path,cam_num);
         fd = open(cam_path, O_RDONLY);
-        if (fd < 0)
+        if (fd < 0) {
+            LOGE("Open %s failed! strr: %s",cam_path,strerror(errno));
             break;
+        }
 
         memset(&capability, 0, sizeof(struct v4l2_capability));
         if (ioctl(fd, VIDIOC_QUERYCAP, &capability) < 0) {
@@ -673,10 +683,12 @@ loop_continue:
         } else {
             camInfoTmp[0].facing_info.facing = (camInfoTmp[1].facing_info.facing == CAMERA_FACING_FRONT) ? CAMERA_FACING_BACK:CAMERA_FACING_FRONT;
         }
-        camInfoTmp[0].facing_info.orientation = (camInfoTmp[0].facing_info.facing == CAMERA_FACING_FRONT)?270:90;
+		//$_rbox_$_modify_$_chenxiao:set camera orientation from 270:90 to 180:0 for usb camera;
+        camInfoTmp[0].facing_info.orientation = (camInfoTmp[0].facing_info.facing == CAMERA_FACING_FRONT)?180:0;
     } else if((strcmp(camInfoTmp[1].driver,"uvcvideo") == 0)) {
+        //$_rbox_$_modify_$_chenxiao:set camera orientation from 270:90 to 180:0 for usb camera;
     	camInfoTmp[1].facing_info.facing = (camInfoTmp[0].facing_info.facing == CAMERA_FACING_FRONT) ? CAMERA_FACING_BACK:CAMERA_FACING_FRONT;
-    	camInfoTmp[1].facing_info.orientation = (camInfoTmp[1].facing_info.facing == CAMERA_FACING_FRONT)?270:90;
+    	camInfoTmp[1].facing_info.orientation = (camInfoTmp[1].facing_info.facing == CAMERA_FACING_FRONT)?180:0;
     }
     gCamerasNumber = cam_cnt;
 
@@ -712,15 +724,15 @@ loop_continue:
     memcpy(&gCamInfos[0], &camInfoTmp[0], sizeof(rk_cam_info_t));
     memcpy(&gCamInfos[1], &camInfoTmp[1], sizeof(rk_cam_info_t));
 
-
+#if 0
     property_get("ro.sf.hwrotation", property, "0");
     hwrotation = strtol(property,0,0);
 
     if (hwrotation == 0) {
-        gCamInfos[0].facing_info.orientation -= 90;
-        gCamInfos[1].facing_info.orientation -= 270;
+        gCamInfos[0].facing_info.orientation = 0;    /* ddl@rock-chips.com: v0.4.17 */ 
+        gCamInfos[1].facing_info.orientation = 0;
     }
-    
+#endif    
 camera_get_number_of_cameras_end:
     LOGD("%s(%d): Current board have %d cameras attached.",__FUNCTION__, __LINE__, gCamerasNumber);
     return gCamerasNumber;

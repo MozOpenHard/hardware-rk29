@@ -46,13 +46,33 @@ LOCAL_SHARED_LIBRARIES := liblog \
 	libcutils \
 	libutils
 
-LOCAL_LDFLAGS = $(LOCAL_PATH)/LibFusion_ARM_cpp.a
+#LOCAL_LDFLAGS = $(LOCAL_PATH)/LibFusion_ARM_cpp.a
+LOCAL_LDFLAGS = $(LOCAL_PATH)/MEMSAlgLib_SI_ARM_cpp.a
 
 LOCAL_PRELINK_MODULE := false
 
-include $(BUILD_SHARED_LIBRARY)
+ifeq ($(strip $(BOARD_SENSOR_ANGLE)), true)
+LOCAL_CFLAGS += -DANGLE_SUPPORT
+endif
 
-include $(LOCAL_PATH)/akm8975/Android.mk
+ifeq ($(strip $(BOARD_SENSOR_CALIBRATION)), true)
+LOCAL_CFLAGS += -DCALIBRATION_SUPPORT
+endif
+
+$(warning BOARD_SENSOR_COMPASS_AK09911 = $(BOARD_SENSOR_COMPASS_AK09911))
+$(warning BOARD_SENSOR_COMPASS_AK8975 = $(BOARD_SENSOR_COMPASS_AK8975))
+$(warning BOARD_SENSOR_COMPASS_AK8963 = $(BOARD_SENSOR_COMPASS_AK8963))
+
+include $(BUILD_SHARED_LIBRARY)
+ifeq ($(strip $(BOARD_SENSOR_COMPASS_AK8963)), true)
+include $(LOCAL_PATH)/akm8963/Android_akm8963.mk
+else
+ifeq ($(strip $(BOARD_SENSOR_COMPASS_AK09911)), true)
+include $(LOCAL_PATH)/akm09911/Android_akm09911.mk
+else
+include $(LOCAL_PATH)/akm8975/Android_akm8975.mk
+endif
+endif # !BOARD_SENSOR_COMPASS_AK8963
 
 endif # !TARGET_SIMULATOR
 endif 
